@@ -1,0 +1,4 @@
+*         # Ignore all dot files
+!.gitignore  # But keep the .gitignore file itself
+._*
+.DS_Store
