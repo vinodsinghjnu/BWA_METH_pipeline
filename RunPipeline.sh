@@ -8,241 +8,191 @@ source $HOME/miniforge3/etc/profile.d/conda.sh
 conda activate ngs_packages
 #conda activate ngs_packages
 
+# SLURM cluster account name #
+HPC_accountName='mutationalscanning'
 
-CODESDIR='/faststorage/project/mutationalscanning/Workspaces/vinod/codes/'
+## required softwares #
 fastqc='/home/vinodsingh/installed_softwares/FastQC/./fastqc'
-REF="02_reference/hg38/hg38.fa"
 
-
-
-#wd=$(pwd) 
-#DATADIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/codes/bwa-meth_pipeline-master/03_raw_data/MuensterMethyFastq/'
-DATADIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/codes/bwa-meth_pipeline-master/03_raw_data/'
+# dataset name"
 DATANAME="PRJEB34432_NormalSperm"
-FASTQDIR=${DATADIR}"$DATANAME"
-INPUT=03_raw_data/${DATANAME}
+
+
+# Make important directories
+mkdir -p 03_raw_data/${DATANAME}
+mkdir -p 04_trimmed/${DATANAME}
+mkdir -p 05_aligned/${DATANAME}
+mkdir -p 06_deduplicated/${DATANAME}
+mkdir -p 07_methyl_dackel/${DATANAME}
+mkdir -p 10_logfiles/${DATANAME}
+
+mkdir -p 02_reference/hg38 && wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz -O 02_reference/hg38/hg38.fa.gz && gunzip 02_reference/hg38/hg38.fa.gz
+#wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
+#mkdir 02_reference/hg38/ ; gunzip hg38.fa.gz;  mv hg38.fa.gz 02_reference/hg38/
+REF="${BASEDIR}/02_reference/hg38/hg38.fa"
+BASEDIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/BWA_METH_pipeline/'
+CODESDIR="${BASEDIR}/01_scripts/"
+FASTQDIR="${BASEDIR}"/03_raw_data/"$DATANAME"/
+
+wd=$(BASEDIR)
+
+mkdir 04_trimmed/${DATANAME}; mkdir 05_aligned/${DATANAME}; mkdir 06_deduplicated/${DATANAME}; mkdir 07_methyl_dackel/${DATANAME}; mkdir 10_logfiles/${DATANAME}
+
+#DATADIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/codes/bwa-meth_pipeline-master/03_raw_data/MuensterMethyFastq/'
 
 # List Samples for alignment #
-fastqPat=".fastq.gz"; grepPat="R1${fastqPat}|1${fastqPat}"
-ls "$INPUT"/*$fastqPat | grep -E $grepPat | parallel basename {} | awk -v pat="_$grepPat" -v repl="" '{ sub(pat,repl,$0); print $0 }' > $(basename $INPUT)_samples_for_alignment.txt  # for muenster published data
+# sample name format: ERR3523436_1.fastq.gz, ERR3523436_2.fastq.gz
+fastqPat=".fastq.gz"; grepPat="_R1${fastqPat}|_1${fastqPat}"
+  ls "$FASTQDIR"/*$fastqPat | grep -E $grepPat | parallel basename {} | \
+  awk -v pat="_$grepPat" -v repl="" '{ sub(pat,repl,$0); print $0 }' \
+  > $(basename $FASTQDIR)_samples_for_alignment.txt  # for muenster published data
+
+cat $(basename $FASTQDIR)_samples_for_alignment.txt
 
 
+# # Get read length 
+# readLengthFile="$FASTQDIR"/read_length.txt
+# cd $FASTQDIR
+# for f in *.fastq.gz; do
+#   rl=$(zcat $f | awk '{if(NR%4==2) print length($1)}' | sort -n | uniq -c)
+#   echo "$f $rl"
+#   #echo $(zcat $f|wc -l)/4|bc
+# done >$readLengthFile
+# cd $wd
 
-# Get read length 
-readLengthFile=${DATADIR}/${DATANAME}/read_length.txt
-cd $FASTQDIR
-for f in *.fastq.gz; do
-  rl=$(zcat $f | awk '{if(NR%4==2) print length($1)}' | sort -n | uniq -c)
-  echo "$f $rl"
-  #echo $(zcat $f|wc -l)/4|bc
-done >$readLengthFile
-cd $wd
 
 ### Create QC report ###
 
-n_cpus=20
-rs=$wd/01_scripts/fastQC_report.R
-master_R_bash_script=${CODESDIR}/runR_masterCluster.sh
-sbatch --account mutationalscanning -J fastQC_report --time 06:00:00 -c $n_cpus --mem 80G  $master_R_bash_script $rs  "-I $FASTQDIR -O ${DATADIR} -T $n_cpus"
-
-cd $DATADIR
 mkdir ${FASTQDIR}/fastqc_analysis
-$fastqc  -f fastq --outdir=${FASTQDIR}/fastqc_analysis -t 4 --memory 10000 ${FASTQDIR}/*.fastq.gz
-cd ${FASTQDIR}/fastqc_analysis
-multiqc . --force
-cd $wd
+srun --account $HPC_accountName --time=02:00:00 -c $n_cpus --mem 40G \
+  conda run -n ngs_packages \
+  fastqc  -f fastq --outdir=${FASTQDIR}/fastqc_analysis -t $n_cpus --memory 10000 "$FASTQDIR"/*.fastq.gz
 
+# MULTIQC report
+conda run -n multiqc_env multiqc ${FASTQDIR}/fastqc_analysis -o ${FASTQDIR}/fastqc_analysis --force
 
+### Reads Triming using FASTp ###
 
+LENGTH=60 # reads below this lengths will be removed
+QUAL=25 # reads below this lengths will be removed
+n_cpus=4
 
-### index the reference with BSseeker2 ###
-sh 01_scripts/00_index_ref.sh $REF
+srun --account $HPC_accountName --time=03:00:00 -c $n_cpus --mem 40G \
+  conda run -n ngs_packages \
+  bash -c "echo 'Using environment: ' && conda info --envs && ls '$FASTQDIR'/*_1.fastq.gz | perl -pe 's/_[12]\.fastq\.gz//g' | \
+  parallel -v -j '$n_cpus' \
+      fastp -i {}_1.fastq.gz -I {}_2.fastq.gz \
+          -o ${BASEDIR}/04_trimmed/${DATANAME}/{/}_1.fastq.gz \
+          -O ${BASEDIR}/04_trimmed/${DATANAME}/{/}_2.fastq.gz \
+          --length_required='$LENGTH' \
+          --qualified_quality_phred='$QUAL' \
+          --correction \
+          --trim_tail1=1 \
+          --trim_tail2=1 \
+          --trim_poly_x \
+          --detect_adapter_for_pe \
+          --overrepresentation_analysis \
+          --json ${BASEDIR}/04_trimmed/${DATANAME}/{/}.json \
+          --html ${BASEDIR}/04_trimmed/{/}.html  \
+          --report_title=${BASEDIR}/04_trimmed/${DATANAME}/{/}.html"
 
-### Triming ###
+### Create QC report of trimmed reads ###
 
-INPUT=03_raw_data/${DATANAME}
-DATANAME=$(basename $INPUT)
+mkdir ${BASEDIR}/04_trimmed/${DATANAME}/fastqc_analysis
+srun --account $HPC_accountName --time=02:00:00 -c $n_cpus --mem 40G \
+  conda run -n ngs_packages \
+  fastqc  -f fastq --outdir=${BASEDIR}/04_trimmed/${DATANAME}/fastqc_analysis -t $n_cpus --memory 10000 ${BASEDIR}/04_trimmed/${DATANAME}/*.fastq.gz
 
-# make important dirs
-mkdir 04_trimmed/${DATANAME}
-mkdir 05_aligned/${DATANAME}
-mkdir 06_deduplicated/${DATANAME}
-mkdir 07_methyl_dackel/${DATANAME}
-mkdir 10_logfiles/${DATANAME}
+# MULTIQC report
+conda run -n multiqc_env multiqc ${BASEDIR}/04_trimmed/${DATANAME}/fastqc_analysis -o ${BASEDIR}/04_trimmed/${DATANAME}/fastqc_analysis --force
 
-# decide read length threshold in 01_fastp_trimming from QC report #
-n_cpus=20
-sbatch --account mutationalscanning -J 01_fastp_trimming.sh --time 07:00:00 -c $n_cpus --mem 80G  01_scripts/01_fastp_trimming.sh $INPUT $n_cpus
-
-
-
-### Again FastqC for trimmed reads data ###
-trim_DATADIR=04_trimmed/${DATANAME}
-mkdir 04_trimmed/${DATANAME}/fastqc_analysis
-$fastqc  -f fastq --outdir=${trim_DATADIR}/fastqc_analysis -t 4 --memory 10000 ${trim_DATADIR}/*fastq.gz
-cd ${trim_DATADIR}/fastqc_analysis
-multiqc .
-cd $wd
 
 
 ###########################
 #### MWA-METH alignment ### 
 ###########################
 
+### index the reference with BSseeker2 ###
 
-#samples=$(ls -1 "$INPUT"/*_R1_001.fastq.gz | perl -pe 's/_R1_001.fastq\.gz//g' | parallel basename {}) # for munster cluster data
+srun --account $HPC_accountName --time=03:00:00 -c $n_cpus --mem 40G \
+  conda run -n ngs_packages \
+  bash -c "echo 'Using environment: ' && echo \$CONDA_DEFAULT_ENV && bwameth.py index $REF && samtools faidx $REF"
 
+#REF=02_reference/GrCh38_EMseq/grch38_core_plus_bs_controls.fa
 
-samples=$(ls -1 "$INPUT"/*_R1_001.fastq.gz | perl -pe 's/_R1_001.fastq\.gz//g' | parallel basename {}) # for munster cluster data
-
-# NOTE #
-# Sample path: 03_raw_data/MuensterMethyFastq/Muenster/A006200243_179937_S22_L001_R1_001.fastq.gz, 03_raw_data/MuensterMethyFastq/Muenster/A006200243_179937_S22_L001_R2_001.fastq.gz
-# We want to extract smple name from this path "A006200243_179937_S22_L001" 
-
-parallel  "sbatch --parsable --account mutationalscanning -J 02_bwa-meth.{} --time 22:00:00 -c $n_cpus --mem 70G 01_scripts/02_bwa-meth.sh $INPUT $n_cpus {}" ::: $samples
+## Alignment BWA-METH ##
+n_cpus=24
+parallel -v sbatch \
+  --account $HPC_accountName \
+  -J 02_bwa-meth.{} \
+  --time 20:00:00 \
+  -c $n_cpus \
+  --mem 80G \
+  ${CODESDIR}/runOn_masterCluster.sh ngs_packages \
+  01_scripts/02_bwa-meth.sh \
+  ${BASEDIR}/04_trimmed/${DATANAME}/{}_1.fastq.gz \
+  ${BASEDIR}/04_trimmed/${DATANAME}/{}_2.fastq.gz \
+  $REF \
+  ${BASEDIR}/05_aligned/${DATANAME}/{}.bam \
+  $n_cpus \
+  {} ::::  $(basename $FASTQDIR)_samples_for_alignment.txt
 
 
 # varify run is complete or not ##
-grep -E error $(ls -1 02_bwa-meth*.out) | wc -l
-grep -E "==> completed" $(ls -1  02_bwa-meth*.out) | wc -l
+grep -E error $(ls -1 xx-02_bwa-meth*.out) | wc -l
+grep -E "==> completed" $(ls -1  xx-02_bwa-meth*.out) | wc -l
 
-mv $(ls -1 02_bwa-meth*.out) 10_logfiles/${DATANAME}/
-
-
-
-## remove duplicates ##
-
-n_cpusD=6
-parallel "sbatch --parsable -J 03_remove_duplicates_{} --time 10:00:00 --cpus-per-task $n_cpusD --mem=60GB 01_scripts/03_remove_duplicates.sh  $INPUT {}" ::: $samples
+mv $(ls -1 xx-02_bwa-meth*.*) 10_logfiles/${DATANAME}/
 
 
-grep -E "==> completed" $(ls  03_remove_duplicates_*.out)
-grep -E error $(ls -1 03_remove_duplicates_*.out) | wc -l
-grep -E "ERROR:" $(ls  03_remove_duplicates_*.out)
-mv $(ls -1 03_remove_duplicates_*.out) 10_logfiles/${DATANAME}/
+## Remove duplicates ##
+
+n_cpus=3
+parallel sbatch \
+  --account $HPC_accountName \
+  -J 03_remove_duplicates_{} \
+  --time 10:00:00 \
+  --cpus-per-task $n_cpus \
+  --mem=60GB \
+  ${CODESDIR}/runOn_masterCluster.sh samtools_1.16.1 \
+  ${CODESDIR}/03_remove_duplicates.sh  \
+  ${BASEDIR}/05_aligned/${DATANAME}/{}.bam \
+  ${BASEDIR}/06_deduplicated/${DATANAME}/{}.dedup.bam \
+  $REF \
+  $n_cpus \
+  {} :::: $(basename $FASTQDIR)_samples_for_alignment.txt
 
 
-# run  script on cluster
-
-# Extra reads filtering ## 03a_filterReads
-# filter out duplicates, low quality reads, not mapped in a proper pair 
-
-n_cpus=2
-parallel "sbatch  --account mutationalscanning -J 03a_filterReads_{} --time 01:00:00 -c $n_cpus --mem 40G 01_scripts/03a_filter_reads.sh $INPUT {}" ::: $samples
-ls -1 03a_filterReads_*.out | wc -l
-grep -E error $(ls -1 03a_filterReads_*.out) # slurm errors
-grep -E "ERROR:TRUNCATED_FILE" $(ls  03a_filterReads_*.out)
-grep -E "ERROR:" $(ls  03a_filterReads_*.out)
-mv $(ls -1 03a_filterReads_*.out) 10_logfiles/${DATANAME}/
-
-
-
+grep -E "==> completed" $(ls  xx-03_remove_duplicates_*.out)
+grep -E error $(ls -1 xx-03_remove_duplicates_*.out) | wc -l
+grep -E "ERROR:" $(ls  xx-03_remove_duplicates_*.out)
+mv $(ls -1 xx-03_remove_duplicates_*.out) 10_logfiles/${DATANAME}/
 
 
 
 ## RUN methyl-dackel_mbias plot ##
 
-rm 04_methyl-dackel_mbias.sh_*.out
-n_cpus=6
-parallel  "sbatch --account mutationalscanning  --time 2:00:00 -c $n_cpus --mem 80G -J 04_methyl-dackel_mbias.sh_{} 01_scripts/04_methyl-dackel_mbias.sh $INPUT $n_cpus $REF {}" ::: $(ls -1 06_deduplicated/${DATANAME}/*.dedup.filt.bam) 
-grep -E "error" $(ls  04_methyl-dackel_mbias.sh_*.out)
+/Users/au734493/mount/genomedk_mutScanning/BWA_METH_pipeline/01_scripts/04_methyl-dackel_mbias.sh
 
-mv $(ls -1 04_methyl-dackel_mbias.sh_*.out) 10_logfiles/${DATANAME}/
-
-
-
-# write data and find threshold ## not necessary
-n_cpus=6
-parallel  "sbatch --account mutationalscanning  --time 2:00:00 -c $n_cpus --mem 80G -J 04a_methyl-dackel_mbias.sh_{1} sh 01_scripts/04a_methyl-dackel_mbias.sh $INPUT $n_cpus {} $" ::: $real_samples 
-grep -E "error" $(ls  04a_methyl-dackel_mbias.sh_*.out)
-
-
-## RUN methyl-dackel_extract  ##
-
-
-# per base depth of bam files ##
-BAM_pat=".dedup.filt.bam"
-BAMreadDepthFile=06_deduplicated/${DATANAME}/BAM_ReadDepth.txt
-for f in $(ls 06_deduplicated/${DATANAME}/*${BAM_pat}); do
-  echo -e "\n$f"
-  tot_size=$(samtools view -H $f | grep -P '^@SQ' | cut -f 3 -d ':' | awk '{sum+=$1} END {print sum}')
-  samtools depth $f |  awk -v var="$tot_size" '{sum+=$3; sumsq+=$3*$3} END { print "Average = ",sum/var; print "Stdev = ",sqrt(sumsq/var - (sum/var)**2)}'
-done >$BAMreadDepthFile
-
- 
-
-n_cpus=2 # only two CPU  are enough
-#BAM_pat='_final.bam'
-BAM_pat=".dedup.filt.bam"
-real_samples=$(ls 06_deduplicated/${DATANAME}/*$BAM_pat | parallel echo {/.} | cut -d'.' -f 1)
-real_samples=${real_samples[@]}
-
-parallel  "sbatch --account mutationalscanning  --time 04:00:00 -c $n_cpus --mem 60G -J 05_methyl-dackel_extract_up.sh_{1} 01_scripts/05_methyl-dackel_extract_up.sh $INPUT $n_cpus $BAM_pat {}" ::: $real_samples 
-head $(ls -1 07_methyl_dackel/${DATANAME}/OTOB*)
-grep -E "==> completed " $(ls 05_methyl-dackel_extract.sh_*.out) | wc -l
-grep -E "error" $(ls 05_methyl-dackel_extract.sh_*.out) | wc -l
-
-mv $(ls -1 05_methyl-dackel_extract.sh_*.out) 10_logfiles/${DATANAME}/
-
-echo $f | xargs -I {} sh -c  "echo $(basename {} ${BAM_pat})_c"
-#samtools merge -o 06_deduplicated/PRJNA357085_Spermatogonia/merge_SRR5099529_SRR5099530_final.bam -@ 3 $(ls -1 06_deduplicated/PRJNA357085_Spermatogonia/*dedup.filt.bam)
-f=06_deduplicated/PRJNA357085_Spermatogonia/merge_SRR5099529_SRR5099530_final.bam
-tot_size=$(samtools view -H $f | grep -P '^@SQ' | cut -f 3 -d ':' | awk '{sum+=$1} END {print sum}')
-samtools depth $f |  awk -v var="$tot_size" '{sum+=$3; sumsq+=$3*$3} END { print "Average = ",sum/var; print "Stdev = ",sqrt(sumsq/var - (sum/var)**2)}'
+n_cpus=10
+parallel sbatch \
+  --account $HPC_accountName \
+  -J 04_methyl-dackel_mbias.{} \
+  --time 10:00:00 \
+  --cpus-per-task $n_cpus \
+  --mem=60GB \
+  ${CODESDIR}/runOn_masterCluster.sh samtools_1.16.1 \
+  ${CODESDIR}/04_methyl-dackel_mbias.sh  \
+  ${BASEDIR}/06_deduplicated/${DATANAME}/{}.dedup.bam \
+  ${BASEDIR}/07_methyl_dackel/${DATANAME}/{}.dedup.mbias.svg \
+  $REF \
+  $n_cpus \
+  {} :::: $(basename $FASTQDIR)_samples_for_alignment.txt
 
 
+grep -E "==> completed" $(ls  xx-04_methyl-dackel_mbias.*.out)
+grep -E error $(ls -1 xx-04_methyl-dackel_mbias.*.out) | wc -l
+grep -E "ERROR:" $(ls  xx-04_methyl-dackel_mbias.*.out)
+mv $(ls -1 xx-04_methyl-dackel_mbias.*.out) 10_logfiles/${DATANAME}/
 
-
-
-
-
-
-rscript1='01_scripts/MethylKitDataAnalysis.R'
-rscript2='01_scripts/MethyFilesRead.R'
-
-
-
-
-
-
-### testing codes ##
-
-
-
-
-
-
-
-
-
-cp -r 01_scripts 10_logfiles/${DATANAME}/
-cp RunPipeline_new2.sh 10_logfiles/${DATANAME}/01_scripts/
-
-
-conda  activate samtools_1.16.1
-GENOME="02_reference/hg38/hg38.fa"
-NCPUS=7
-bamFile="06_deduplicated/Muenster/179937_Sperm_UndiffSpermatogonia_179937_final.bam"
-sample='test_179937'
-cd "/faststorage/project/mutationalscanning/Workspaces/vinod/codes/bwa-meth_pipeline-master/"
-MethylDackel mbias -@ "$NCPUS" --noCpG --CHH --CHG  "$GENOME" "$bamFile" "${sample}_chn"
-MethylDackel mbias -@ $NCPUS --noCpG --CHH --CHG $GENOME $bamFile ${sample}_chn>&OTOBchn$sample.txt
-
-MethylDackel extract $(cat OTOBchn$sample.txt | cut -d ':' -f 2) --noCpG --CHH --CHG --minOppositeDepth 1 --maxVariantFrac 0.1 "$GENOME" $bamFile \; \
-gzip {.}_CHN.methylKit \; \
-
-###### run on old data ##
-
-oldInput='06_deduplicated/PRJEB34432_NormalSpermBam'
-mkdir 07_methyl_dackel/PRJEB34432_NormalSpermBam
-old_samples=('P4_NC002' 'P4_NC004' 'P4_NC005' 'P4_NC007' 'P4_NC008')
-old_samples=${old_samples[@]}
-
-
-n_cpus2=6
-parallel  "sbatch --account mutationalscanning  --time 2:00:00 -c $n_cpus2 --mem 80G -J 04_methyl-dackel_mbias.sh_old_{1} 01_scripts/04_methyl-dackel_mbias.sh $oldInput $n_cpus {}" ::: $old_samples 
-grep -E "error" $(ls  04_methyl-dackel_mbias.sh_old*.out)
-
-
-parallel "sbatch --account mutationalscanning  --time 5:00:00 -c $n_cpus --mem 60G -J 05_methyl-dackel_extract.sh_old_{1} 01_scripts/05_methyl-dackel_extract.sh $oldInput $n_cpus {}" ::: $old_samples
 

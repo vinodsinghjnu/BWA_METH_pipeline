@@ -1,60 +1,60 @@
 #!/bin/bash
 
 
-source $HOME/miniforge3/etc/profile.d/conda.sh
-conda activate ngs_packages
-
-SCRIPT=$0
-INPUT=$1
-DATANAME=$(basename $INPUT)
-NCPUS="$2"
-SAMPLE="$3"
-
-
-NAME=$(basename $0)
-LLOG_FOLDER="10_logfiles/${DATANAME}"
-
-# Define options
-GENOME="02_reference/hg38/hg38.fa"  # Genomic reference .fasta
-#GENOME="02_reference/GrCh38_EMseq/grch38_core_plus_bs_controls.fa"
-TRIMMED_FOLDER="04_trimmed/${DATANAME}"
-ALIGNED_FOLDER="05_aligned/${DATANAME}"
-mkdir $ALIGNED_FOLDER
-
-TEMP_FOLDER="99_tmp/"
-
-
-
-#ls -1 "$INPUT"/*_R1_001.fastq.gz | perl -pe 's/_R[12]_001.fastq\.gz//g' | parallel basename {}  > $(basename $INPUT)_samples_for_alignment.txt
-SAMPLE_FILE=$(basename $INPUT)_samples_for_alignment.txt
+INPUT_R1="$1"
+INPUT_R2="$2"
+GENOME="$3"
+ALIGNED_BAM="$4"
+NCPUS="$5"
+SAMPLE="$6"
 
 start=`date +%s.%N`
 
-# Align reads
-cat "$SAMPLE_FILE" | grep -E "$SAMPLE" |
-while read file
-do
-    base=$(basename $file)
-    echo "Aligning $base"
+# Check that all required variables are set
+if [[ -z "$INPUT_R1" || -z "$INPUT_R2" || -z "$GENOME" || -z "$ALIGNED_BAM" || -z "$SAMPLE" ]]; then
+    echo "Error: One or more required variables are unset!"
+    exit 1
+fi
 
-    # Align
-    bwameth.py --threads "$NCPUS" \
-        --reference "$GENOME" \
-        "$TRIMMED_FOLDER"/"$base"_R1.fastq.gz \
-        "$TRIMMED_FOLDER"/"$base"_R2.fastq.gz |
-        samtools view -Sb -q 10 - |
-        samtools sort - > "$ALIGNED_FOLDER"/"$base".bam
+echo "Processing: $INPUT_R1 and $INPUT_R2"
+echo "Output BAM: $ALIGNED_BAM"
 
-    samtools index "$ALIGNED_FOLDER"/"$base".bam
-done
 
-# Cleanup temp folder
-rm -r "$TEMP_FOLDER"/* 2>/dev/null
+# Align
 
-conda deactivate
+bwameth.py --threads "$((NCPUS / 2))" \
+    --reference "$GENOME" \
+    "$INPUT_R1" "$INPUT_R2" | \
+    samtools view -@ "$((NCPUS / 4))" -Sb -q 10 -F 4 -F 256 -F 2048 - | \
+    samtools sort -@ "$((NCPUS / 2))" -o "$ALIGNED_BAM" -T "${SAMPLE}_temp" && \
+    samtools index "$ALIGNED_BAM"
+
+## Add MD and NM tags
+#samtools calmd -@ "$NCPUS" -b "$ALIGNED_BAM" "$GENOME" > "${ALIGNED_BAM%.bam}.calmd.bam" 2> "${ALIGNED_BAM%.bam}.calmd.log"
+
+## Re-index the updated BAM
+#samtools index "${ALIGNED_BAM%.bam}.calmd.bam"
+
+## Remove original BAM and its index
+#rm -v "$ALIGNED_BAM" "$ALIGNED_BAM.bai"
+
+## Rename the new BAM to match the original filename (optional)
+#mv -v "${ALIGNED_BAM%.bam}.calmd.bam" "$ALIGNED_BAM"
+#mv -v "${ALIGNED_BAM%.bam}.calmd.bam.bai" "$ALIGNED_BAM.bai"
+
+##
+
+# samtools view -@ "$((NCPUS / 4))" -Sb -q 10 -f 1 - | \
+# samtools view -@ "$((NCPUS / 4))" -Sb -q 1 -F 4 -F 256 -F 2048 -
+# -q 1: Keeps nearly all mapped reads (removes unaligned ones).
+# -f 1: Keeps properly paired reads
+# -F 4: Excludes unmapped reads.
+# -F 256: Removes secondary alignments.
+# -F 2048: Removes supplementary alignments.
 
 end=`date +%s.%N`
 runtime=$( echo "$end - $start" | bc -l )
 runtime=${runtime%.*}
 hours=$((runtime / 3600)); minutes=$(( (runtime % 3600) / 60 )); seconds=$(( (runtime % 3600) % 60 ))
 echo "==> completed Runtime: $hours:$minutes:$seconds (hh:mm:ss)"
+
