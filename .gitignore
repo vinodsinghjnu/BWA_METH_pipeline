@@ -2,3 +2,22 @@
 !.gitignore  # But keep the .gitignore file itself
 ._*
 .DS_Store
+*.fastq.gz
+*.bam
+*.bam.bai
+*.gz
+*.out
+*.err
+*.html
+*.log
+*.fa
+*.bwt
+*.ann
+*.pac
+*.sa
+*.amb
+*.fa.fai
+!*.md
+!*.py
+!*.sh
+!*.R
