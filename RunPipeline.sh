@@ -1,24 +1,21 @@
 #!/bin/bash
 
 
-wd='/home/vinodsingh/mutationalscanning/Workspaces/vinod/codes/bwa-meth_pipeline-master'
-cd $wd
+BASEDIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/BWA_METH_pipeline/'
+wd=$(BASEDIR)
 
-source $HOME/miniforge3/etc/profile.d/conda.sh
-conda activate ngs_packages
-#conda activate ngs_packages
+## Create Reference genome directory and download refrence genome (One time) ##
+mkdir -p 02_reference/hg38 && wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz -O 02_reference/hg38/hg38.fa.gz && gunzip 02_reference/hg38/hg38.fa.gz
 
 # SLURM cluster account name #
 HPC_accountName='mutationalscanning'
 
-## required softwares #
-fastqc='/home/vinodsingh/installed_softwares/FastQC/./fastqc'
+##  start from here for each DATANAME ##
 
 # dataset name"
 DATANAME="PRJEB34432_NormalSperm"
 
-
-# Make important directories
+# Make important Intermidiate directories
 mkdir -p 03_raw_data/${DATANAME}
 mkdir -p 04_trimmed/${DATANAME}
 mkdir -p 05_aligned/${DATANAME}
@@ -26,19 +23,13 @@ mkdir -p 06_deduplicated/${DATANAME}
 mkdir -p 07_methyl_dackel/${DATANAME}
 mkdir -p 10_logfiles/${DATANAME}
 
-mkdir -p 02_reference/hg38 && wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz -O 02_reference/hg38/hg38.fa.gz && gunzip 02_reference/hg38/hg38.fa.gz
-#wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
-#mkdir 02_reference/hg38/ ; gunzip hg38.fa.gz;  mv hg38.fa.gz 02_reference/hg38/
+
 REF="${BASEDIR}/02_reference/hg38/hg38.fa"
-BASEDIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/BWA_METH_pipeline/'
 CODESDIR="${BASEDIR}/01_scripts/"
 FASTQDIR="${BASEDIR}"/03_raw_data/"$DATANAME"/
 
-wd=$(BASEDIR)
-
-mkdir 04_trimmed/${DATANAME}; mkdir 05_aligned/${DATANAME}; mkdir 06_deduplicated/${DATANAME}; mkdir 07_methyl_dackel/${DATANAME}; mkdir 10_logfiles/${DATANAME}
-
-#DATADIR='/home/vinodsingh/mutationalscanning/Workspaces/vinod/codes/bwa-meth_pipeline-master/03_raw_data/MuensterMethyFastq/'
+# copy / softlink fastq files from source to $FASTQDIR
+cp source/*fastq.gz $FASTQDIR
 
 # List Samples for alignment #
 # sample name format: ERR3523436_1.fastq.gz, ERR3523436_2.fastq.gz
@@ -48,17 +39,6 @@ fastqPat=".fastq.gz"; grepPat="_R1${fastqPat}|_1${fastqPat}"
   > $(basename $FASTQDIR)_samples_for_alignment.txt  # for muenster published data
 
 cat $(basename $FASTQDIR)_samples_for_alignment.txt
-
-
-# # Get read length 
-# readLengthFile="$FASTQDIR"/read_length.txt
-# cd $FASTQDIR
-# for f in *.fastq.gz; do
-#   rl=$(zcat $f | awk '{if(NR%4==2) print length($1)}' | sort -n | uniq -c)
-#   echo "$f $rl"
-#   #echo $(zcat $f|wc -l)/4|bc
-# done >$readLengthFile
-# cd $wd
 
 
 ### Create QC report ###
